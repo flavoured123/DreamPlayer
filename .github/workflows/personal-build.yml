@@ -41,7 +41,14 @@ jobs:
           EOF
 
       - name: Build split-per-abi APKs
-        run: flutter build apk --release --split-per-abi
+        run: |
+          set -o pipefail
+          flutter build apk --release --split-per-abi 2>&1 | tee build.log || {
+            # Surface compile errors as annotations (readable via the API).
+            msg=$(grep -E "Error:|error:|^e: |What went wrong" -A2 build.log | head -80 | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')
+            echo "::error title=build::${msg}"
+            exit 1
+          }
 
       - name: Rename APKs
         run: |
