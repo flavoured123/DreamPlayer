@@ -477,6 +477,17 @@ class _PlayerScreenState extends State<PlayerScreen>
   double _seekDragPx = 0;
   int _seekTargetMs = 0;
 
+  /// TV remote scrub (Left/Right on the D-pad). Presses accumulate into a
+  /// target that is committed with ONE backend seek after a short pause, so
+  /// rapid presses / holding the key never fire a burst of seeks (which made
+  /// network streams stall) and never depend on a stale [_position].
+  bool _tvScrubActive = false;
+  int _tvScrubBaseMs = 0;
+  int _tvScrubTargetMs = 0;
+  DateTime? _tvScrubHoldStart;
+  DateTime _tvScrubLastStep = DateTime.fromMillisecondsSinceEpoch(0);
+  Timer? _tvScrubCommitTimer;
+
   /// Pinch-to-zoom crop scale (1.0 = fit, up to 3.0). Transient per session.
   double _zoomScale = 1.0;
 
@@ -3826,6 +3837,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     WidgetsBinding.instance.removeObserver(this);
     TmdService.instance.removeListener(_onTmdbChanged);
     _hideTimer?.cancel();
+    _tvScrubCommitTimer?.cancel();
     _sleepTicker?.cancel();
     _swipeOverlayTimer?.cancel();
     _singleTapTimer?.cancel();
@@ -3915,7 +3927,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _hideTimer?.cancel();
     // Auto-hide on every platform (including TV) while playing — any remote
     // button press reveals the controls again.
-    if (!_playing || _buffering || _dragging) return;
+    if (!_playing || _buffering || _dragging || _tvScrubActive) return;
     _hideTimer = Timer(_autoHideAfter, () {
       if (mounted &&
           _controlsVisible &&
@@ -6365,6 +6377,162 @@ if (mounted) setState(_applySwipeValue);
     } catch (_) {}
   }
 
+  /// One D-pad Left/Right step. [repeat] is true for auto-repeat while the
+  /// key is held: steps are throttled to ~6/s and grow 10 s -> 30 s -> 60 s
+  /// the longer the key is held, like Kodi / Shield players.
+  void _tvScrub(int direction, {bool repeat = false}) {
+    if (_touchLocked || !_backendReady || _inPip) return;
+    final now = DateTime.now();
+    if (!repeat) {
+      _tvScrubHoldStart = now;
+    } else if (now.difference(_tvScrubLastStep).inMilliseconds < 160) {
+      return; // throttle key auto-repeat
+    }
+    _tvScrubLastStep = now;
+    if (!_tvScrubActive) {
+      _tvScrubActive = true;
+      _tvScrubBaseMs = _position.inMilliseconds;
+      _tvScrubTargetMs = _tvScrubBaseMs;
+    }
+    final heldMs = now.difference(_tvScrubHoldStart ?? now).inMilliseconds;
+    final stepMs = heldMs >= 4000
+        ? 60000
+        : heldMs >= 1500
+            ? 30000
+            : 10000;
+    final dur = _duration.inMilliseconds;
+    var t = _tvScrubTargetMs + direction * stepMs;
+    if (t < 0) t = 0;
+    if (dur > 0 && t > dur - 1000) t = (dur - 1000).clamp(0, dur);
+    _hideTimer?.cancel();
+    setState(() => _tvScrubTargetMs = t);
+    _tvScrubCommitTimer?.cancel();
+    _tvScrubCommitTimer =
+        Timer(const Duration(milliseconds: 700), _tvScrubCommit);
+  }
+
+  /// Applies the accumulated scrub target with a single seek.
+  void _tvScrubCommit() {
+    _tvScrubCommitTimer?.cancel();
+    if (!_tvScrubActive || !mounted) return;
+    final target = _tvScrubTargetMs;
+    final moved = (target - _tvScrubBaseMs).abs() >= 300;
+    setState(() {
+      _tvScrubActive = false;
+      // Optimistic position: the next scrub starts from here even before
+      // the engine reports the new position.
+      if (moved) _position = Duration(milliseconds: target);
+    });
+    if (moved) {
+      final wasCompleted = _completed;
+      _completed = false;
+      _seekBackend(Duration(milliseconds: target));
+      if (wasCompleted) {
+        final mpv = _mpvPlayer;
+        if (_mpvReady && mpv != null) {
+          unawaited(mpv.play());
+        } else {
+          _exo?.play();
+        }
+      }
+    }
+    _restartHideTimer();
+  }
+
+  /// Back while scrubbing: drop the pending target, stay where we are.
+  void _tvScrubCancel() {
+    _tvScrubCommitTimer?.cancel();
+    if (!_tvScrubActive) return;
+    setState(() => _tvScrubActive = false);
+    _restartHideTimer();
+  }
+
+  /// Slim bottom OSD shown while scrubbing with the remote and the full
+  /// controls are hidden: target time, +/- delta and a progress line.
+  Widget _buildTvScrubOsd() {
+    final dur = _duration.inMilliseconds;
+    final target = Duration(milliseconds: _tvScrubTargetMs);
+    final deltaMs = _tvScrubTargetMs - _tvScrubBaseMs;
+    final sign = deltaMs >= 0 ? '+' : '−';
+    final frac = dur > 0 ? (_tvScrubTargetMs / dur).clamp(0.0, 1.0) : 0.0;
+    final bufFrac =
+        dur > 0 ? (_buffered.inMilliseconds / dur).clamp(0.0, 1.0) : 0.0;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(32, 16, 32, 28),
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.bottomCenter,
+          end: Alignment.topCenter,
+          colors: [Color(0xCC000000), Color(0x00000000)],
+        ),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Text(
+                _formatDuration(target),
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 22,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Text(
+                '$sign${_formatDuration(Duration(milliseconds: deltaMs.abs()))}',
+                style: TextStyle(
+                  color: deltaMs >= 0
+                      ? Colors.lightGreenAccent
+                      : Colors.orangeAccent,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const Spacer(),
+              Text(
+                _formatDuration(_duration),
+                style: const TextStyle(color: Colors.white70, fontSize: 16),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          LayoutBuilder(
+            builder: (context, c) => SizedBox(
+              height: 6,
+              child: Stack(
+                children: [
+                  Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                  ),
+                  Container(
+                    width: c.maxWidth * bufFrac,
+                    decoration: BoxDecoration(
+                      color: Colors.white38,
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                  ),
+                  Container(
+                    width: c.maxWidth * frac,
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).colorScheme.primary,
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _seekBy(Duration delta) {
     if (_touchLocked) return;
     if (_mpvReady) {
@@ -6744,6 +6912,8 @@ if (mounted) setState(_applySwipeValue);
         : video.duration.inMilliseconds.toDouble().clamp(1.0, double.infinity);
     final sliderValue = _dragging
         ? _dragValue
+        : _tvScrubActive
+        ? _tvScrubTargetMs.toDouble().clamp(0, maxMs).toDouble()
         : _position.inMilliseconds.toDouble().clamp(0, maxMs).toDouble();
 
     final hdrChip = FormatChip(label: _hdrLabel, color: _hdrColor);
@@ -7038,6 +7208,25 @@ if (mounted) setState(_applySwipeValue);
             return KeyEventResult.handled;
           }
 
+          // A remote scrub is pending: OK applies it now, BACK cancels it,
+          // Left/Right keep scrubbing; anything else applies it and then
+          // falls through to its normal action.
+          if (_isTv && _tvScrubActive) {
+            if (key == LogicalKeyboardKey.arrowLeft ||
+                key == LogicalKeyboardKey.arrowRight) {
+              // Handled below (hidden) or by the focused seek bar.
+            } else if (okKey) {
+              _tvScrubCommit();
+              return KeyEventResult.handled;
+            } else if (key == LogicalKeyboardKey.goBack ||
+                key == LogicalKeyboardKey.escape) {
+              _tvScrubCancel();
+              return KeyEventResult.handled;
+            } else {
+              _tvScrubCommit();
+            }
+          }
+
           if (_isTv && _controlsVisible) {
             // Just Player style: when controls are visible on TV, let the
             // normal Android focus system handle arrow keys for button
@@ -7057,13 +7246,12 @@ if (mounted) setState(_applySwipeValue);
                 return KeyEventResult.handled;
               }
               return KeyEventResult.ignored; // activate the focused control
-            } else if (key == LogicalKeyboardKey.mediaRewind) {
-              _seekBy(const Duration(seconds: -10));
-              _showControls();
-              return KeyEventResult.handled;
-            } else if (key == LogicalKeyboardKey.mediaFastForward) {
-              _seekBy(const Duration(seconds: 10));
-              _showControls();
+            } else if (key == LogicalKeyboardKey.mediaRewind ||
+                key == LogicalKeyboardKey.mediaFastForward) {
+              _tvScrub(
+                key == LogicalKeyboardKey.mediaFastForward ? 1 : -1,
+                repeat: event is KeyRepeatEvent,
+              );
               return KeyEventResult.handled;
             } else if (key == LogicalKeyboardKey.arrowLeft ||
                 key == LogicalKeyboardKey.arrowRight ||
@@ -7086,21 +7274,22 @@ if (mounted) setState(_applySwipeValue);
               _togglePlayPause();
               _showControls();
               return KeyEventResult.handled;
-            } else if (key == LogicalKeyboardKey.mediaRewind) {
-              _seekBy(const Duration(seconds: -10));
-              _showControls();
+            } else if (key == LogicalKeyboardKey.mediaRewind ||
+                key == LogicalKeyboardKey.mediaFastForward) {
+              _tvScrub(
+                key == LogicalKeyboardKey.mediaFastForward ? 1 : -1,
+                repeat: event is KeyRepeatEvent,
+              );
               return KeyEventResult.handled;
-            } else if (key == LogicalKeyboardKey.mediaFastForward) {
-              _seekBy(const Duration(seconds: 10));
-              _showControls();
-              return KeyEventResult.handled;
-            } else if (key == LogicalKeyboardKey.arrowLeft) {
-              _seekBy(const Duration(seconds: -10));
-              _showControls();
-              return KeyEventResult.handled;
-            } else if (key == LogicalKeyboardKey.arrowRight) {
-              _seekBy(const Duration(seconds: 10));
-              _showControls();
+            } else if (key == LogicalKeyboardKey.arrowLeft ||
+                key == LogicalKeyboardKey.arrowRight) {
+              // Scrub WITHOUT opening the full controls: opening them moved
+              // focus to the buttons, so the next Left/Right navigated
+              // instead of seeking. The slim scrub OSD shows progress.
+              _tvScrub(
+                key == LogicalKeyboardKey.arrowRight ? 1 : -1,
+                repeat: event is KeyRepeatEvent,
+              );
               return KeyEventResult.handled;
             } else if (key == LogicalKeyboardKey.goBack ||
                 key == LogicalKeyboardKey.escape) {
@@ -7307,6 +7496,15 @@ if (mounted) setState(_applySwipeValue);
                     ),
                   ),
                 ),
+              ),
+            // D-pad scrub OSD (controls hidden; the seek bar shows the
+            // target itself when the controls are open).
+            if (_tvScrubActive && !_controlsVisible)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: IgnorePointer(child: _buildTvScrubOsd()),
               ),
             // Horizontal-swipe seek preview (timestamp + frame thumbnail).
             if (_seekPreviewActive)
@@ -7634,6 +7832,10 @@ if (mounted) setState(_applySwipeValue);
                                 onChanged: _onSeekUpdate,
                                 onChangeEnd: _onSeekEnd,
                                 onFocusChange: (_) => _showControls(),
+                                onKeyStep: _isTv
+                                    ? (dir, repeat) =>
+                                        _tvScrub(dir, repeat: repeat)
+                                    : null,
                                 chapters: _chapters,
                                 onDoubleTap: _gotoNextChapter,
                               ),
@@ -7964,6 +8166,7 @@ class _BufferedSeekBar extends StatefulWidget {
     this.onChangeEnd,
     this.onFocusChange,
     this.onDoubleTap,
+    this.onKeyStep,
   });
 
   final double value;
@@ -7977,6 +8180,10 @@ class _BufferedSeekBar extends StatefulWidget {
   /// Chapter markers drawn on the track, and the target of a double-tap.
   final List<ExoChapter> chapters;
   final VoidCallback? onDoubleTap;
+
+  /// D-pad Left/Right handler (direction -1/+1, isAutoRepeat). When set the
+  /// parent accumulates steps and seeks once, instead of one seek per press.
+  final void Function(int direction, bool repeat)? onKeyStep;
 
   @override
   State<_BufferedSeekBar> createState() => _BufferedSeekBarState();
@@ -8060,6 +8267,14 @@ class _BufferedSeekBarState extends State<_BufferedSeekBar> {
       onKeyEvent: (node, event) {
         if (event is KeyDownEvent || event is KeyRepeatEvent) {
           final key = event.logicalKey;
+          final step = widget.onKeyStep;
+          if (step != null &&
+              (key == LogicalKeyboardKey.arrowLeft ||
+                  key == LogicalKeyboardKey.arrowRight)) {
+            step(key == LogicalKeyboardKey.arrowRight ? 1 : -1,
+                event is KeyRepeatEvent);
+            return KeyEventResult.handled;
+          }
           if (key == LogicalKeyboardKey.arrowLeft) {
             _stepSeek(-10000);
             return KeyEventResult.handled;

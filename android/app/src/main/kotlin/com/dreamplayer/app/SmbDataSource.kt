@@ -57,7 +57,12 @@ internal object BufferTuning {
             val am = context.applicationContext
                 .getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
             if (am != null) {
-                val heapMb = am.memoryClass
+                // The manifest sets android:largeHeap="true", so the real
+                // Java-heap limit is largeMemoryClass, not memoryClass. Using
+                // memoryClass capped Fire TV devices (192 MB) at a 24 MiB
+                // Media3 buffer: only ~3 s of a 60-80 Mb/s debrid REMUX,
+                // which is what made external-player (Nuvio) streams stutter.
+                val heapMb = maxOf(am.memoryClass, am.largeMemoryClass)
                 val lowRam = am.isLowRamDevice
                 when {
                     lowRam || heapMb <= 192 -> {
@@ -85,6 +90,8 @@ internal object BufferTuning {
                         media3TargetBytes = 96 * 1024 * 1024
                     }
                 }
+                // Media3 read-ahead: a quarter of the usable heap, 24..128 MiB.
+                media3TargetBytes = ((heapMb / 4).coerceIn(24, 128)) * 1024 * 1024
                 Log.i(
                     "BufferTuning",
                     "heap=${heapMb}MB lowRam=$lowRam -> ring=${ringCapacityBytes / 1048576}MB " +

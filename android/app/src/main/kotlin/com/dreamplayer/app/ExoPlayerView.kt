@@ -2710,8 +2710,11 @@ class ExoPlayerView(
     }
 
     companion object {
-        private const val BUFFER_FOR_PLAYBACK_MS = 1_500
-        private const val BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS = 2_000
+        // Start after 2.5 s, but after a stall wait for 6 s of media: resuming
+        // on 2 s made debrid/HTTP streams stall again within seconds (the
+        // "plays a bit, stops, plays a bit" pattern).
+        private const val BUFFER_FOR_PLAYBACK_MS = 2_500
+        private const val BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS = 6_000
 
         /// The live platform view, if any — MainActivity forwards HOME /
         /// picture-in-picture mode changes to it (auto-pip + dismissal pause).
