@@ -91,7 +91,9 @@ internal object BufferTuning {
                     }
                 }
                 // Media3 read-ahead: a quarter of the usable heap, 24..128 MiB.
-                media3TargetBytes = ((heapMb / 4).coerceIn(24, 128)) * 1024 * 1024
+                // Capped at 64 MiB: the original author hit Java-heap OOMs
+                // (reported as video decoder failures) above that.
+                media3TargetBytes = ((heapMb / 4).coerceIn(24, 64)) * 1024 * 1024
                 Log.i(
                     "BufferTuning",
                     "heap=${heapMb}MB lowRam=$lowRam -> ring=${ringCapacityBytes / 1048576}MB " +

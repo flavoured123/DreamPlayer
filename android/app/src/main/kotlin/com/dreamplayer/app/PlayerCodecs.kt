@@ -27,6 +27,54 @@ import javax.net.ssl.X509TrustManager
 ///    layers are HDR10 HEVC).
 object PlayerCodecs {
 
+    /// Set per open() from Dart: play any DV P7/P8 stream as its HDR10 base
+    /// layer on the HEVC decoder. Used as the first recovery step when the DV
+    /// decoder fails, before any (slow) software decoding is tried.
+    @Volatile
+    var forceDvBaseLayer: Boolean = false
+
+    @Volatile
+    private var dvP7DecoderCache: Boolean? = null
+
+    /// Whether this device has a DV decoder that explicitly lists profile 7.
+    private fun deviceDecodesDvProfile7(): Boolean {
+        dvP7DecoderCache?.let { return it }
+        val result = try {
+            androidx.media3.exoplayer.mediacodec.MediaCodecUtil
+                .getDecoderInfos(MimeTypes.VIDEO_DOLBY_VISION, false, false)
+                .any { info ->
+                    info.capabilities?.profileLevels?.any {
+                        it.profile == android.media.MediaCodecInfo.CodecProfileLevel.DolbyVisionProfileDvheDtb
+                    } == true
+                }
+        } catch (e: Exception) {
+            false
+        }
+        android.util.Log.i("PlayerCodecs", "DV profile 7 decoder present: $result")
+        dvP7DecoderCache = result
+        return result
+    }
+
+    /// Whether a Dolby Vision [format] should be decoded as its HDR10 base
+    /// layer on the plain HEVC hardware decoder (see DreamVideoRenderer).
+    ///  * P7 (UHD Blu-ray remux): yes, unless the device's DV decoder lists P7.
+    ///    Fire TV devices don't — their DV decoder fails on P7 mid-playback.
+    ///  * P8: only when forced (Media3 already falls back to HEVC on non-DV
+    ///    displays).
+    ///  * P5 and others: never (the base layer isn't HDR10 — wrong colours).
+    fun useDvBaseLayer(format: androidx.media3.common.Format): Boolean {
+        if (format.sampleMimeType != MimeTypes.VIDEO_DOLBY_VISION) return false
+        val profile = androidx.media3.common.util.CodecSpecificDataUtil
+            .getCodecProfileAndLevel(format)?.first ?: return false
+        return when (profile) {
+            android.media.MediaCodecInfo.CodecProfileLevel.DolbyVisionProfileDvheDtb ->
+                forceDvBaseLayer || !deviceDecodesDvProfile7()
+            android.media.MediaCodecInfo.CodecProfileLevel.DolbyVisionProfileDvheSt ->
+                forceDvBaseLayer
+            else -> false
+        }
+    }
+
     /// Whether audio passthrough is active: user toggle ON in Settings AND an
     /// HDMI output (TV / soundbar / AVR) is currently connected.
     fun passthroughEnabled(context: Context): Boolean {

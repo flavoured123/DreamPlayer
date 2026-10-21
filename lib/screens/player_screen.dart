@@ -285,6 +285,20 @@ class _PlayerScreenState extends State<PlayerScreen>
   Duration _buffered = Duration.zero;
   bool _playing = false;
   bool _buffering = false;
+
+  /// ExoPlayer playWhenReady: stays true while buffering after a seek, so the
+  /// play/pause button doesn't flip to "play" during every rebuffer.
+  bool _playWhenReady = false;
+
+  /// Dolby Vision recovery: reopen with the DV stream decoded as its HDR10
+  /// base layer on the HEVC hardware decoder (see DreamVideoRenderer.kt).
+  bool _dvBaseLayer = false;
+  bool _dvBaseLayerRetried = false;
+  int _liveVideoHeight = 0;
+
+  /// Retry button of the error surface — focused on TV when an error shows.
+  final FocusNode _errorRetryFocus = FocusNode();
+  ModalRoute<dynamic>? _route;
   bool _completed = false;
 
   // The 7-day free trial (wall-clock, persisted) replaced the old 30-minute
@@ -522,9 +536,44 @@ class _PlayerScreenState extends State<PlayerScreen>
       _mpvActive && _mpvPlayer != null && !_mpvFailed;
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _route = ModalRoute.of(context);
+  }
+
+  /// TV safety net: if keyboard focus ever drops out of the player (a focused
+  /// control is rebuilt away, the error surface appears/disappears, the video
+  /// view is recreated after a decoder fallback), Flutter has no focused
+  /// widget and EVERY remote key is ignored — the "remote is dead" state.
+  /// Pull focus back into the player whenever that happens while the player
+  /// is the top route (sheets/dialogs on top keep their own focus).
+  bool _focusRescueScheduled = false;
+  void _onGlobalFocusChange() {
+    if (!mounted || !_isTv || _focusRescueScheduled) return;
+    _focusRescueScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _focusRescueScheduled = false;
+      if (!mounted || !(_route?.isCurrent ?? true)) return;
+      final f = FocusManager.instance.primaryFocus;
+      final inPlayer = f != null &&
+          (f == _playerFocusScopeNode ||
+              f.ancestors.contains(_playerFocusScopeNode));
+      if (inPlayer) return;
+      if (_errorIsTerminal && _errorRetryFocus.canRequestFocus) {
+        _errorRetryFocus.requestFocus();
+      } else if (_controlsVisible && _playPauseFocusNode.canRequestFocus) {
+        _playPauseFocusNode.requestFocus();
+      } else {
+        _playerFocusScopeNode.requestFocus();
+      }
+    });
+  }
+
+  @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    FocusManager.instance.addListener(_onGlobalFocusChange);
     // Keep the system UI mode constant (immersive) for the whole player
     // screen. Toggling immersive/edgeToEdge during the rotation transition
     // fights the system's own rotation animation and makes the video jitter.
@@ -802,6 +851,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         externalSubtitles: externalSubs,
         decoderMode: _decoderMode.storageString,
         readingLanguage: readingLang,
+        dvBaseLayer: _dvBaseLayer,
       );
       // Re-apply the user's persisted fit mode + speed + audio filters.
       _exo?.setFitMode(_fitMode);
@@ -899,6 +949,26 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// The original decoder mode is saved and restored on the next open.
   Future<void> _trySoftwareDecodeFallback(String fallbackError) async {
     debugPrint('sw-fallback: called, swRetried=$_swRetried, ffmpegVideoRetried=$_ffmpegVideoRetried, decoderMode=$_decoderMode, error=$fallbackError');
+    // Step 0: Dolby Vision. The DV hardware decoder failing (typical for a
+    // profile 7 UHD remux on Fire TV) is recovered by decoding the HDR10 base
+    // layer on the HEVC hardware decoder — still 4K HDR, still hardware.
+    if (!_dvBaseLayerRetried &&
+        !_mpvActive &&
+        Platform.isAndroid &&
+        _effectiveHdr == HdrFormat.dolbyVision) {
+      _dvBaseLayerRetried = true;
+      _dvBaseLayer = true;
+      debugPrint('sw-fallback: DV decoder failed, reopening as HDR10 base layer');
+      setState(() => _error = 'Dolby Vision decoder failed — playing HDR10…');
+      await _reopenAt(_position, _duration);
+      return;
+    }
+    // Software-decoding 4K on a TV box can't keep up: the picture freezes and
+    // the whole app stops reacting to the remote. Skip straight to the next
+    // step instead.
+    if (_isTv && _liveVideoHeight > 1088) {
+      _ffmpegVideoRetried = true;
+    }
     // Step 1: If we haven't tried FFmpeg video yet, force empty video decoder
     // list so Media3 uses the FfmpegVideoRenderer extension (NextLib FFmpeg).
     // This is faster than mpv and stays in the Media3 pipeline.
@@ -958,8 +1028,31 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// anymore — the error surface shows a "Try with MPV" button instead, and
   /// the details screen offers both engines up front.
   void _setTerminalError(String message) {
-    if (mounted) setState(() => _error = message);
+    if (!mounted) return;
+    setState(() => _error = message);
+    if (_isTv) {
+      // Put the remote on the error buttons; the transport controls are
+      // hidden behind a terminal error (see build), so nothing else could
+      // hold focus and the remote would otherwise feel dead.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _error != null && !_errorIsTransient) {
+          _errorRetryFocus.requestFocus();
+        }
+      });
+    }
   }
+
+  /// Status banners shown while a recovery step runs ("Reconnecting…",
+  /// "… retrying with FFmpeg…", "trying libmpv…"): they end in an ellipsis
+  /// and must not show the Retry / MPV / external buttons on top of the
+  /// player controls.
+  bool get _errorIsTransient {
+    final e = _error;
+    return e != null && (e.contains('…') || e.endsWith('...'));
+  }
+
+  /// A real, final error: the error surface owns the screen and the remote.
+  bool get _errorIsTerminal => _error != null && !_errorIsTransient;
 
   /// Opens the video in an external player app via Android ACTION_VIEW.
   /// For SMB, builds a real smb://user@host/share/path URI.
@@ -3078,6 +3171,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     _swRetried = false;
     _ffmpegVideoRetried = false;
     _autoFallbackTried = false;
+    _dvBaseLayer = false;
+    _dvBaseLayerRetried = false;
+    _liveVideoHeight = 0;
     if (orig != null && _decoderMode != orig) {
       _decoderMode = orig;
       await DecoderModeStore.save(orig);
@@ -3103,6 +3199,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         externalSubtitles: externalSubs,
         decoderMode: _decoderMode.storageString,
         readingLanguage: await SubtitlePrefs.loadReadingLanguage(),
+        dvBaseLayer: _dvBaseLayer,
       );
       _exo?.setFitMode(_fitMode);
       _exo?.setSpeed(_playbackSpeed);
@@ -3209,6 +3306,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     final wasPlaying = _playing;
     final wasBuffering = _buffering;
     _playing = e.playing;
+    _playWhenReady = e.playWhenReady;
+    // A recovery banner ("retrying with …") is cleared as soon as the
+    // reopened stream actually plays.
+    if (_playing && _errorIsTransient) _error = null;
     _position = e.position;
     _duration = e.duration;
     _buffered = e.buffered;
@@ -3322,6 +3423,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       unawaited(_checkHdrGate());
     }
     if (e.videoWidth > 0 && e.videoHeight > 0) {
+      _liveVideoHeight = e.videoHeight;
       _liveResolution = friendlyResolution(e.videoWidth, e.videoHeight);
     }
     if (e.videoWidth > 0 ||
@@ -3838,6 +3940,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     TmdService.instance.removeListener(_onTmdbChanged);
     _hideTimer?.cancel();
     _tvScrubCommitTimer?.cancel();
+    FocusManager.instance.removeListener(_onGlobalFocusChange);
+    _errorRetryFocus.dispose();
     _sleepTicker?.cancel();
     _swipeOverlayTimer?.cancel();
     _singleTapTimer?.cancel();
@@ -6677,6 +6781,12 @@ if (mounted) setState(_applySwipeValue);
     _showControls();
   }
 
+  /// What the play/pause button shows: "playing" also while Media3 is
+  /// buffering with play intent (after a seek), so a press then pauses
+  /// instead of being a no-op that looks like the player hung.
+  bool get _showsPlaying =>
+      _mpvReady ? _playing : (_playing || (_buffering && _playWhenReady));
+
   Future<void> _togglePlayPause() async {
     if (_touchLocked) return;
     final mpv = _mpvPlayer;
@@ -6700,7 +6810,7 @@ if (mounted) setState(_applySwipeValue);
     if (_completed) {
       exo.seekTo(Duration.zero);
       exo.play();
-    } else if (_playing) {
+    } else if (_showsPlaying) {
       exo.pause();
     } else {
       // Don't start HDR playback for a post-trial free user — re-gate every
@@ -7392,9 +7502,31 @@ if (mounted) setState(_applySwipeValue);
                             ],
                           ),
                         )
-                      : _error != null
+                      : _error != null && _errorIsTransient
                           ? Padding(
                               padding: const EdgeInsets.all(24),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const CircularProgressIndicator(
+                                      color: Colors.white),
+                                  const SizedBox(height: 16),
+                                  Text(
+                                    _error!,
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(
+                                        color: Colors.white70),
+                                  ),
+                                ],
+                              ),
+                            )
+                      : _error != null
+                          ? Container(
+                              padding: const EdgeInsets.all(24),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withValues(alpha: 0.75),
+                                borderRadius: BorderRadius.circular(16),
+                              ),
                               child: Column(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
@@ -7411,6 +7543,8 @@ if (mounted) setState(_applySwipeValue);
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
                                       OutlinedButton.icon(
+                                        focusNode: _errorRetryFocus,
+                                        autofocus: _isTv,
                                         onPressed: () {
                                           _error = null;
                                           _ioRetries = 0;
@@ -7669,9 +7803,11 @@ if (mounted) setState(_applySwipeValue);
             ),
             AnimatedOpacity(
               duration: const Duration(milliseconds: 200),
-              opacity: _controlsVisible ? 1 : 0,
+              opacity: _controlsVisible && !_errorIsTerminal ? 1 : 0,
               child: IgnorePointer(
-                ignoring: !_controlsVisible,
+                ignoring: !_controlsVisible || _errorIsTerminal,
+                child: ExcludeFocus(
+                excluding: _errorIsTerminal,
                 child: Center(
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
@@ -7682,7 +7818,9 @@ if (mounted) setState(_applySwipeValue);
                         _TvControlButton(
                           onPressed: !_backendReady
                               ? null
-                              : () => _seekBy(const Duration(seconds: -10)),
+                              // Accumulated like the D-pad: several presses
+                              // = one seek, no seek burst on a network stream.
+                              : () => _tvScrub(-1),
                           iconSize: 40,
                           icon: const Icon(Icons.replay_10),
                           color: Colors.white,
@@ -7713,7 +7851,7 @@ if (mounted) setState(_applySwipeValue);
                         icon: Icon(
                           _completed
                               ? Icons.replay
-                              : _playing
+                              : _showsPlaying
                               ? Icons.pause_circle_filled
                               : Icons.play_circle_fill,
                         ),
@@ -7725,7 +7863,9 @@ if (mounted) setState(_applySwipeValue);
                         _TvControlButton(
                           onPressed: !_backendReady
                               ? null
-                              : () => _seekBy(const Duration(seconds: 10)),
+                              // Accumulated like the D-pad: several presses
+                              // = one seek, no seek burst on a network stream.
+                              : () => _tvScrub(1),
                           iconSize: 40,
                           icon: const Icon(Icons.forward_10),
                           color: Colors.white,
@@ -7741,6 +7881,7 @@ if (mounted) setState(_applySwipeValue);
                       ],
                     ],
                   ),
+                ),
                 ),
               ),
             ),
@@ -8581,11 +8722,17 @@ class _TvControlButtonState extends State<_TvControlButton> {
                       ]
                     : null,
               ),
-              child: IconButton(
-                onPressed: widget.onPressed,
-                iconSize: widget.iconSize,
-                icon: widget.icon,
-                color: widget.color ?? Colors.white,
+              // ExcludeFocus: the outer Focus is the single D-pad stop (it
+              // handles OK itself). A focusable IconButton inside made every
+              // button TWO stops, so moving across the controls needed extra
+              // presses and felt laggy. Touch still works through onPressed.
+              child: ExcludeFocus(
+                child: IconButton(
+                  onPressed: widget.onPressed,
+                  iconSize: widget.iconSize,
+                  icon: widget.icon,
+                  color: widget.color ?? Colors.white,
+                ),
               ),
             ),
           );

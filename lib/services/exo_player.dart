@@ -266,6 +266,7 @@ class ExoPlayerEvent {
   const ExoPlayerEvent({
     required this.state,
     required this.playing,
+    bool? playWhenReady,
     required this.buffering,
     required this.ended,
     required this.positionMs,
@@ -301,10 +302,14 @@ class ExoPlayerEvent {
     this.isHwDecoder,
     this.inPip = false,
     this.sourceScheme = '',
-  });
+  }) : playWhenReady = playWhenReady ?? playing;
 
   final int state;
   final bool playing;
+
+  /// The user's play intent (ExoPlayer playWhenReady). Unlike [playing] it
+  /// stays true while the player is buffering after a seek.
+  final bool playWhenReady;
   final bool buffering;
   final bool ended;
   final int positionMs;
@@ -400,6 +405,9 @@ class ExoPlayerEvent {
     return ExoPlayerEvent(
       state: asInt(m['state']),
       playing: m['playing'] == true,
+      playWhenReady: m['playWhenReady'] is bool
+          ? m['playWhenReady'] as bool
+          : m['playing'] == true,
       buffering: m['buffering'] == true,
       ended: m['ended'] == true,
       positionMs: asInt(m['positionMs']),
@@ -467,6 +475,7 @@ abstract class PlaybackController {
     List<VideoExternalSub>? externalSubtitles,
     String? decoderMode,
     String? readingLanguage,
+    bool dvBaseLayer = false,
   });
 
   Future<void> play();
@@ -593,7 +602,9 @@ class ExoPlayerController implements PlaybackController {
     List<VideoExternalSub>? externalSubtitles,
     String? decoderMode,
     String? readingLanguage,
+    bool dvBaseLayer = false,
   }) => _send('open', {
+    'dvBaseLayer': dvBaseLayer,
     if (uri != null && uri.isNotEmpty) 'uri': uri else 'path': path,
     if (path.isNotEmpty) 'path': path,
     if (subtitleUri != null && subtitleUri.isNotEmpty)

@@ -11,6 +11,7 @@ import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.FfmpegAudioRenderer
 import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.FfmpegVideoRenderer
+import androidx.media3.exoplayer.video.MediaCodecVideoRenderer
 import androidx.media3.exoplayer.video.VideoRendererEventListener
 import java.util.ArrayList
 
@@ -48,6 +49,7 @@ class DreamRenderersFactory(context: Context) : DefaultRenderersFactory(context)
         allowedJoiningTimeMs: Long,
         out: ArrayList<Renderer>,
     ) {
+        val mediaCodecIndex = out.size
         super.buildVideoRenderers(
             context,
             extensionRendererMode,
@@ -58,6 +60,25 @@ class DreamRenderersFactory(context: Context) : DefaultRenderersFactory(context)
             allowedJoiningTimeMs,
             out,
         )
+        // Swap the stock MediaCodec video renderer for DreamVideoRenderer
+        // (same settings) so Dolby Vision profile 7 can be decoded as its
+        // HDR10 base layer on the HEVC hardware decoder.
+        if (out.getOrNull(mediaCodecIndex) is MediaCodecVideoRenderer) {
+            try {
+                out[mediaCodecIndex] = DreamVideoRenderer(
+                    MediaCodecVideoRenderer.Builder(context)
+                        .setCodecAdapterFactory(getCodecAdapterFactory())
+                        .setMediaCodecSelector(codecSelector)
+                        .setAllowedJoiningTimeMs(allowedJoiningTimeMs)
+                        .setEnableDecoderFallback(enableDecoderFallback)
+                        .setEventHandler(eventHandler)
+                        .setEventListener(eventListener)
+                        .setMaxDroppedFramesToNotify(DefaultRenderersFactory.MAX_DROPPED_VIDEO_FRAME_COUNT_TO_NOTIFY),
+                )
+            } catch (e: Exception) {
+                Log.w("DreamRenderersFactory", "DreamVideoRenderer unavailable, keeping stock renderer.", e)
+            }
+        }
         // Add FfmpegVideoRenderer as ultimate fallback (after all MediaCodec
         // renderers). Used when hardware + software MediaCodec decoders both
         // fail (e.g. 10-bit HEVC on devices without 10-bit MediaCodec support).

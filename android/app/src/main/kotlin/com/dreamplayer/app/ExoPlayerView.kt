@@ -84,6 +84,12 @@ class ExoPlayerView(
 
     private val playerView = ForcedAspectPlayerView(activity).apply {
         useController = false
+        // Never let the native video view take Android key focus: on a TV
+        // the D-pad / media keys would then go to this view instead of the
+        // Flutter controls and the remote appears dead.
+        isFocusable = false
+        isFocusableInTouchMode = false
+        descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
         resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
         setShutterBackgroundColor(android.graphics.Color.BLACK)
         setKeepContentOnPlayerReset(true)
@@ -1271,6 +1277,8 @@ class ExoPlayerView(
                 "open" -> {
                     try {
                         registerSpatialListenerOnce()
+                        PlayerCodecs.forceDvBaseLayer =
+                            call.argument<Boolean>("dvBaseLayer") ?: false
                         // Recreate the player when the decoder mode changed so
                         // renderers are rebuilt with the new MediaCodecSelector
                         // (the lambda reads prefs live on every query). Prefer the
@@ -2195,6 +2203,7 @@ class ExoPlayerView(
         val map = HashMap<String, Any?>()
         map["state"] = state
         map["playing"] = player.isPlaying
+        map["playWhenReady"] = player.playWhenReady
         map["positionMs"] = player.currentPosition
         map["durationMs"] = if (player.duration == C.TIME_UNSET) 0L else player.duration
         map["bufferedMs"] = player.bufferedPosition
