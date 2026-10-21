@@ -3820,6 +3820,13 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     if (_playing && !_buffering) {
       _restartHideTimer();
+    } else if (_isTv && !_mpvReady && _buffering && _playWhenReady) {
+      // TV: a rebuffer after a seek is NOT a pause. Popping the controls up
+      // here (old behaviour) made every forward/rewind look like a pause and
+      // moved the remote onto the centre buttons, so the next Left/Right
+      // navigated instead of seeking. Keep the current visibility; the
+      // centre spinner shows the buffering.
+      _hideTimer?.cancel();
     } else {
       _hideTimer?.cancel();
       _controlsVisible = true;

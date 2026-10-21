@@ -33,42 +33,21 @@ object PlayerCodecs {
     @Volatile
     var forceDvBaseLayer: Boolean = false
 
-    @Volatile
-    private var dvP7DecoderCache: Boolean? = null
-
-    /// Whether this device has a DV decoder that explicitly lists profile 7.
-    private fun deviceDecodesDvProfile7(): Boolean {
-        dvP7DecoderCache?.let { return it }
-        val result = try {
-            androidx.media3.exoplayer.mediacodec.MediaCodecUtil
-                .getDecoderInfos(MimeTypes.VIDEO_DOLBY_VISION, false, false)
-                .any { info ->
-                    info.capabilities?.profileLevels?.any {
-                        it.profile == android.media.MediaCodecInfo.CodecProfileLevel.DolbyVisionProfileDvheDtb
-                    } == true
-                }
-        } catch (e: Exception) {
-            false
-        }
-        android.util.Log.i("PlayerCodecs", "DV profile 7 decoder present: $result")
-        dvP7DecoderCache = result
-        return result
-    }
-
     /// Whether a Dolby Vision [format] should be decoded as its HDR10 base
     /// layer on the plain HEVC hardware decoder (see DreamVideoRenderer).
-    ///  * P7 (UHD Blu-ray remux): yes, unless the device's DV decoder lists P7.
-    ///    Fire TV devices don't — their DV decoder fails on P7 mid-playback.
-    ///  * P8: only when forced (Media3 already falls back to HEVC on non-DV
-    ///    displays).
+    ///  * P7 / P8: only when forced (recovery step after the DV decoder
+    ///    failed; Media3 already falls back to HEVC for P8 on non-DV displays).
     ///  * P5 and others: never (the base layer isn't HDR10 — wrong colours).
     fun useDvBaseLayer(format: androidx.media3.common.Format): Boolean {
         if (format.sampleMimeType != MimeTypes.VIDEO_DOLBY_VISION) return false
         val profile = androidx.media3.common.util.CodecSpecificDataUtil
             .getCodecProfileAndLevel(format)?.first ?: return false
         return when (profile) {
+            // P7 keeps the device's DV decoder by default: the Fire TV Cube
+            // plays it as real Dolby Vision (TV switches to its DV modes).
+            // HDR10 base layer only as recovery after a DV decode failure.
             android.media.MediaCodecInfo.CodecProfileLevel.DolbyVisionProfileDvheDtb ->
-                forceDvBaseLayer || !deviceDecodesDvProfile7()
+                forceDvBaseLayer
             android.media.MediaCodecInfo.CodecProfileLevel.DolbyVisionProfileDvheSt ->
                 forceDvBaseLayer
             else -> false
