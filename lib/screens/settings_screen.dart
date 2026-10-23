@@ -59,6 +59,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _otherVideos = false;
   bool _cleared = false;
   bool _passthrough = false;
+  bool _preferFfmpegAudio = false;
   bool _swipeGestures = true;
   bool _mpvNormalizeDownmix = false;
   bool _pipEnabled = true;
@@ -658,7 +659,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _loadPassthrough() async {
     final enabled = await isAudioPassthroughEnabled();
-    if (mounted) setState(() => _passthrough = enabled);
+    final ffmpegAudio = await isPreferFfmpegAudioEnabled();
+    if (mounted) {
+      setState(() {
+        _passthrough = enabled;
+        _preferFfmpegAudio = ffmpegAudio;
+      });
+    }
   }
 
   Future<void> _loadSwipeGestures() async {
@@ -1459,6 +1466,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       if (mounted) setState(() => _passthrough = value);
                     },
                   ),
+                  // === Audio decoder priority (Media3, Android) ===
+                  if (defaultTargetPlatform == TargetPlatform.android &&
+                      _showMedia3Settings)
+                    SwitchListTile(
+                      secondary: const Icon(Icons.graphic_eq),
+                      title: const Text('Prefer FFmpeg audio decoder'),
+                      subtitle: Text(
+                        _preferFfmpegAudio
+                            ? 'On — FFmpeg decodes audio first (fixes stutter on some streams; passthrough bypassed)'
+                            : 'Off — device audio decoder first (default)',
+                      ),
+                      value: _preferFfmpegAudio,
+                      onChanged: (value) async {
+                        final prefs = await SharedPreferences.getInstance();
+                        await prefs.setBool(kPreferFfmpegAudioKey, value);
+                        if (mounted) setState(() => _preferFfmpegAudio = value);
+                        if (!context.mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(AppLocalizations.of(context).settingsTakesEffectNextVideo),
+                          ),
+                        );
+                      },
+                    ),
                 ],
               ),
             // === Subtitles ===

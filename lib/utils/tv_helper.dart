@@ -56,6 +56,19 @@ Future<bool> isAudioPassthroughEnabled() async {
   return prefs.getBool(kAudioPassthroughKey) ?? false;
 }
 
+/// SharedPreferences key for "Prefer FFmpeg audio decoder" (Media3, Android).
+///
+/// When on, the FFmpeg audio renderer is tried before the platform MediaCodec
+/// audio decoder (like Nuvio's "Decoder Priority: Prefer app decoders
+/// (FFmpeg)"). Fixes streams that stutter with the platform audio decoder on
+/// the Fire TV Cube. FFmpeg outputs PCM, so passthrough is bypassed while on.
+const kPreferFfmpegAudioKey = 'dreamplayer.preferFfmpegAudio';
+
+Future<bool> isPreferFfmpegAudioEnabled() async {
+  final prefs = await SharedPreferences.getInstance();
+  return prefs.getBool(kPreferFfmpegAudioKey) ?? false;
+}
+
 /// SharedPreferences key for the swipe-gestures toggle.
 const kSwipeGesturesKey = 'dreamplayer.swipeGestures';
 

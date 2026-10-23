@@ -504,13 +504,19 @@ class ExoPlayerView(
     /// [open] can recreate it when the user switches modes.
     private var lastDecoderMode: String = PlayerCodecs.decoderMode(activity)
 
+    /// Audio decoder priority the current player was built with. The FFmpeg
+    /// audio renderer's position is fixed when the renderers are built, so a
+    /// change in this setting also needs a player rebuild (see [open]).
+    private var lastPreferFfmpegAudio: Boolean = PlayerCodecs.preferFfmpegAudio(activity)
+
     private var player: ExoPlayer = createPlayer()
     private fun createPlayer(): ExoPlayer {
         lastDecoderMode = PlayerCodecs.decoderMode(activity)
+        lastPreferFfmpegAudio = PlayerCodecs.preferFfmpegAudio(activity)
         return ExoPlayer.Builder(activity)
             .setMediaSourceFactory(mediaSourceFactory)
             .setRenderersFactory(
-                DreamRenderersFactory(activity)
+                DreamRenderersFactory(activity, preferFfmpegAudio = lastPreferFfmpegAudio)
                     .apply {
                         setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
                         setEnableDecoderFallback(true)
@@ -1288,9 +1294,13 @@ class ExoPlayerView(
                         val currentMode = call.argument<String>("decoderMode")
                             ?.takeIf { it.isNotEmpty() }
                             ?: PlayerCodecs.decoderMode(activity)
-                        if (currentMode != lastDecoderMode) {
+                        val preferFfmpegAudioNow = PlayerCodecs.preferFfmpegAudio(activity)
+                        if (currentMode != lastDecoderMode ||
+                            preferFfmpegAudioNow != lastPreferFfmpegAudio
+                        ) {
                             val previousMode = lastDecoderMode
-                            Log.i("ExoPlayerView", "Decoder mode changed: $lastDecoderMode -> $currentMode (from open channel), recreating player.")
+                            val previousPreferFfmpegAudio = lastPreferFfmpegAudio
+                            Log.i("ExoPlayerView", "Decoder mode changed: $lastDecoderMode -> $currentMode, preferFfmpegAudio: $lastPreferFfmpegAudio -> $preferFfmpegAudioNow (from open channel), recreating player.")
                             // Build the replacement BEFORE releasing the current
                             // one: if createPlayer() throws (extension/renderer
                             // construction failure, OOM — most likely exactly
@@ -1317,6 +1327,7 @@ class ExoPlayerView(
                                 // open() retries the recreation instead of
                                 // wrongly believing it already matches.
                                 lastDecoderMode = previousMode
+                                lastPreferFfmpegAudio = previousPreferFfmpegAudio
                                 null
                             }
                             if (newPlayer != null) {

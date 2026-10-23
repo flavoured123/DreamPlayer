@@ -15,7 +15,17 @@ import androidx.media3.exoplayer.video.MediaCodecVideoRenderer
 import androidx.media3.exoplayer.video.VideoRendererEventListener
 import java.util.ArrayList
 
-class DreamRenderersFactory(context: Context) : DefaultRenderersFactory(context) {
+/// [preferFfmpegAudio]: put the FFmpeg audio renderer AHEAD of the platform
+/// MediaCodec audio renderers (Media3's EXTENSION_RENDERER_MODE_PREFER, for
+/// audio only) — the same as Nuvio's "Decoder Priority: Prefer app decoders
+/// (FFmpeg)". On the Fire TV Cube some streams (e.g. Reacher) stutter with the
+/// platform audio decoder and play smoothly once FFmpeg decodes the audio.
+/// FFmpeg outputs PCM, so with this on, HDMI passthrough is bypassed for every
+/// format FFmpeg can decode (AC3, E-AC3, TrueHD, DTS...).
+class DreamRenderersFactory(
+    context: Context,
+    private val preferFfmpegAudio: Boolean = false,
+) : DefaultRenderersFactory(context) {
     init {
         setAllowedVideoJoiningTimeMs(0L)
     }
@@ -102,6 +112,7 @@ class DreamRenderersFactory(context: Context) : DefaultRenderersFactory(context)
         eventListener: AudioRendererEventListener,
         out: ArrayList<Renderer>,
     ) {
+        val firstAudioIndex = out.size
         super.buildAudioRenderers(
             context,
             extensionRendererMode,
@@ -113,8 +124,17 @@ class DreamRenderersFactory(context: Context) : DefaultRenderersFactory(context)
             out,
         )
         try {
-            out.add(FfmpegAudioRenderer(eventHandler, eventListener, audioSink))
-            Log.i("DreamRenderersFactory", "Loaded FfmpegAudioRenderer.")
+            val ffmpeg = FfmpegAudioRenderer(eventHandler, eventListener, audioSink)
+            if (preferFfmpegAudio) {
+                // Media3 picks the FIRST renderer that handles a track, so
+                // inserting before the MediaCodec audio renderer makes FFmpeg
+                // win for every format it supports.
+                out.add(firstAudioIndex, ffmpeg)
+                Log.i("DreamRenderersFactory", "Loaded FfmpegAudioRenderer (preferred over MediaCodec).")
+            } else {
+                out.add(ffmpeg)
+                Log.i("DreamRenderersFactory", "Loaded FfmpegAudioRenderer.")
+            }
         } catch (e: Exception) {
             Log.w("DreamRenderersFactory", "FfmpegAudioRenderer unavailable, falling back to MediaCodec only.", e)
         }

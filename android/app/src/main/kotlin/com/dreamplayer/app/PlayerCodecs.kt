@@ -101,6 +101,14 @@ object PlayerCodecs {
         return OkHttpDataSource.Factory(client)
     }
 
+    /// Settings -> Audio -> "Prefer FFmpeg audio decoder" (default off).
+    fun preferFfmpegAudio(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(
+            "FlutterSharedPreferences", Context.MODE_PRIVATE,
+        )
+        return prefs.getBoolean("flutter.dreamplayer.preferFfmpegAudio", false)
+    }
+
     fun decoderMode(context: Context): String {
         val prefs = context.getSharedPreferences(
             "FlutterSharedPreferences", Context.MODE_PRIVATE,
